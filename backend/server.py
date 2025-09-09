@@ -129,7 +129,7 @@ Look for these misinformation indicators:
 - Appeals to fear or anger
 
 Respond with a JSON object containing: credibility_score, verdict, confidence, reasoning, education_tips"""
-        ).with_model("gemini", "gemini-2.5-pro-preview-05-06")
+        ).with_model("gemini", "gemini-2.0-flash")
         
         # Create message based on content type
         if content_type == "image" and image_base64:
