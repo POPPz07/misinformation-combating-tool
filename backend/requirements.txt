@@ -4,6 +4,6 @@ motor
 python-dotenv
 Pillow
 google-generativeai
-duckduckgo-search
+ddgs
 pydantic
 python-multipart
