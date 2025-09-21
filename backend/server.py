@@ -15,8 +15,7 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from PIL import Image
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 from ddgs import DDGS
 import asyncio
 
