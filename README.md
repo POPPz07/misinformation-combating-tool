@@ -15,7 +15,6 @@
 
 - *Frontend:* JavaScript, HTML, CSS
 - *Backend:* Python (for NLP and analysis)
-- *Other Tools:* [List any libraries or frameworks used, e.g., React, FastAPI]
 
 ## Getting Started
 
