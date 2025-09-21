@@ -15,7 +15,13 @@ from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from PIL import Image
-import google.generativeai as genai
+from google import genai
+from google.genai import types
+from ddgs import DDGS
+import asyncio
+
+
+
 
 # --- Initial Setup ---
 ROOT_DIR = Path(__file__).parent
@@ -33,12 +39,10 @@ except KeyError as e:
     exit()
 
 # --- Gemini API Configuration ---
-try:
-    gemini_api_key = os.environ['GEMINI_API_KEY']
-    genai.configure(api_key=gemini_api_key)
-except KeyError:
+gemini_api_key = os.environ.get('GEMINI_API_KEY')
+if not gemini_api_key:
     logging.error("FATAL: GEMINI_API_KEY not found in .env file.")
-    gemini_api_key = None
+
 
 # --- Pydantic Models (Data Structures) ---
 class User(BaseModel):
@@ -73,111 +77,141 @@ class HistoryResponse(BaseModel):
     analyses: List[AnalysisResult]
     total_count: int
 
-# --- Core Gemini Analysis Logic ---
-import base64
-import io
-import json
-import logging
-from typing import Optional
 
-import google.generativeai as genai
-from fastapi import HTTPException
-from PIL import Image
+# --- DuckDuckGo Search Function ---
+async def search_with_ddgs(query: str, max_results: int = 5) -> List[dict]:
+    """
+    Perform a search using DuckDuckGo and return results.
+    Runs synchronous DDGS in executor to avoid blocking.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        # Run the synchronous DDGS search in an executor
+        results = await loop.run_in_executor(
+            None,
+            lambda: list(DDGS().text(query, max_results=max_results))
+        )
+        return results
+    except Exception as e:
+        logging.error(f"Error performing DuckDuckGo search: {e}")
+        return []
 
-# Assume gemini_api_key is defined globally as before
 
+# --- Updated Gemini Analysis Function ---
 async def analyze_content_with_gemini(content: str, image_base64: Optional[str]) -> dict:
     if not gemini_api_key:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured on the server.")
 
-    # This prompt is for the first step: getting a detailed, text-based analysis.
-    # It no longer needs to mention JSON.
-    system_prompt = """You are TruthLens, an expert AI misinformation detection system. Your primary goal is to analyze content (text or images) and determine its credibility with high accuracy.
+    client = genai.Client(api_key=gemini_api_key)
+    
+    # First, perform a DuckDuckGo search to gather context
+    search_results = []
+    if content and len(content.strip()) > 0:
+        # Create a search query from the content (limit to reasonable length)
+        search_query = content[:200] if len(content) > 200 else content
+        search_results = await search_with_ddgs(search_query, max_results=5)
+    
+    # Format search results for Gemini
+    search_context = ""
+    if search_results:
+        search_context = "\n\nRelevant search results from DuckDuckGo:\n"
+        for idx, result in enumerate(search_results, 1):
+            title = result.get('title', 'No title')
+            body = result.get('body', 'No description')
+            href = result.get('href', 'No URL')
+            search_context += f"\n{idx}. Title: {title}\n   URL: {href}\n   Summary: {body}\n"
+    
+    # System prompt for Gemini
+    system_prompt = f"""You are TruthLens, an expert AI misinformation detection system. Your primary goal is to analyze content (text or images) and determine its credibility with high accuracy.
 
     **CRITICAL INSTRUCTIONS:**
-    1.  **USE THE GOOGLE SEARCH TOOL:** Before providing any analysis, you MUST use the provided Google Search tool to find real-time information, verify claims, check sources, and look for context or debunking articles related to the content. Your reasoning must be grounded in the search results.
-    2.  **DETAILED ANALYSIS:** Provide comprehensive reasoning based on your search findings. Explain any manipulative techniques, verify facts, assess source credibility, and give a clear verdict on the content's likely truthfulness.
+    1. **ANALYZE THE CONTENT:** Carefully analyze the provided content for credibility, checking for signs of misinformation, manipulation, or false claims.
+    
+    2. **USE SEARCH RESULTS:** I have provided DuckDuckGo search results below. Use these to:
+       - Verify claims made in the content
+       - Check if the information aligns with credible sources
+       - Identify if the content contradicts established facts
+       - Look for signs that the content might be from unreliable sources
+    
+    3. **JSON OUTPUT ONLY:** You MUST respond with only a valid JSON object matching this structure:
+       - `credibility_score`: An integer from 0 (High Risk of Fake) to 100 (Likely True).
+       - `verdict`: A string, one of: "Likely True", "Potentially Misleading", "High Risk of Fake".
+       - `confidence`: A float from 0.0 to 1.0 representing your confidence in the assessment.
+       - `reasoning`: A detailed string explaining your verdict, referencing the search results where relevant. Explain any manipulative techniques used (e.g., emotional language, missing sources, logical fallacies).
+       - `education_tips`: A JSON array of 3-5 actionable string tips to help users identify similar misinformation in the future.
 
-    Analyze the user's content for indicators like emotional manipulation, unreliable sources, manipulated data, suspicious context, and logical fallacies. For images, also consider signs of visual manipulation."""
+    Analyze for indicators like emotional manipulation, unreliable sources, manipulated data, suspicious context, and logical fallacies. For images, also consider signs of visual manipulation.
+    
+    {search_context}"""
 
-    try:
-        # --- Step 1: Get grounded analysis using Google Search ---
-        search_model = genai.GenerativeModel(
-            model_name='gemini-2.0-flash',
-            system_instruction=system_prompt,
-            # ✅ CORRECTED: Use a simple string in a list for the built-in search tool.
-            tools=['google_search'],
-            generation_config={"max_output_tokens": 2048}
-        )
-
-        # Prepare prompt for either image or text analysis
-        prompt_parts = []
-        if image_base64:
-            if "," in image_base64:
-                image_base64 = image_base64.split(",")[1]
+    # Build contents: text-only or text + PIL image
+    if image_base64:
+        if "," in image_base64:
+            image_base64 = image_base64.split(",", 1)[1]
+        try:
             image_bytes = base64.b64decode(image_base64)
             img = Image.open(io.BytesIO(image_bytes))
-            mime_type = Image.MIME.get(img.format, "image/jpeg")
-            prompt_parts.append({"mime_type": mime_type, "data": image_bytes})
-            prompt_parts.append(f"Analyze this image. Accompanying text: {content[:500] if content else 'No text'}")
-        else:
-            prompt_parts.append(f"Analyze this text: {content[:4000]}")
+            contents = [f"Analyze this image. Accompanying text: {content[:500] if content else 'No text'}", img]
+        except Exception as e:
+            logging.error(f"Error processing image: {e}")
+            contents = [f"Analyze this text (image processing failed): {content[:4000]}"]
+    else:
+        contents = [f"Analyze this text: {content[:4000]}"]
 
-        grounded_response = await search_model.generate_content_async(prompt_parts)
-        grounded_text = grounded_response.text
+    # Configure Gemini without grounding (we're providing our own search results)
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        response_mime_type="application/json",
+        max_output_tokens=1024,
+        temperature=0.3  # Lower temperature for more consistent analysis
+    )
 
-        # --- Step 2: Structure the analysis into JSON ---
-        json_model = genai.GenerativeModel(
-            model_name='gemini-2.0-flash-lite',
-            generation_config={
-                "response_mime_type": "application/json",
-                "max_output_tokens": 1024
-            }
+    try:
+        # Async call to Gemini
+        resp = await client.aio.models.generate_content(
+            model="gemini-2.0-flash-exp",  # Using the experimental model without grounding
+            contents=contents,
+            config=config
         )
 
-        json_prompt = f"""
-        Convert the following analysis into the exact JSON format specified.
-
-        Source Analysis:
-        ---
-        {grounded_text}
-        ---
-
-        Required JSON format:
-        {{
-            "credibility_score": <number 0-100>,
-            "verdict": "<string, one of: 'Likely True', 'Potentially Misleading', 'High Risk of Fake'>",
-            "confidence": <number 0.0-1.0>,
-            "reasoning": "<detailed explanation from source analysis>",
-            "education_tips": ["<tip1>", "<tip2>", "<tip3>"]
-        }}
-
-        Ensure the output is ONLY the valid JSON object with no additional text or markdown.
-        """
-
-        json_response = await json_model.generate_content_async(json_prompt)
-
+        # Parse the JSON response
         try:
-            return json.loads(json_response.text)
-        except json.JSONDecodeError:
-            logging.error("Failed to decode the final JSON response from the structuring model.")
+            result = json.loads(resp.text)
+            # Validate the response structure
+            required_fields = ['credibility_score', 'verdict', 'confidence', 'reasoning', 'education_tips']
+            for field in required_fields:
+                if field not in result:
+                    raise ValueError(f"Missing required field: {field}")
+            
+            # Ensure types are correct
+            result['credibility_score'] = int(result['credibility_score'])
+            result['confidence'] = float(result['confidence'])
+            if not isinstance(result['education_tips'], list):
+                result['education_tips'] = [result['education_tips']]
+            
+            return result
+            
+        except (json.JSONDecodeError, ValueError, KeyError) as e:
+            logging.error(f"Error parsing Gemini response: {e}, Response text: {resp.text[:500]}")
             return {
                 "credibility_score": 50,
                 "verdict": "Analysis Inconclusive",
                 "confidence": 0.3,
-                "reasoning": "Unable to complete analysis due to a final content formatting error.",
-                "education_tips": ["Double-check information from primary sources.", "Be wary of content that confirms strong biases."]
+                "reasoning": f"Unable to parse analysis result. Raw response: {resp.text[:500]}",
+                "education_tips": ["Always verify information with multiple reliable sources.", "Be skeptical of content that cannot be properly analyzed."]
             }
 
     except Exception as e:
-        logging.error(f"Error during the two-step Gemini analysis: {str(e)}")
+        logging.exception(f"Error during Gemini call: {e}")
         return {
             "credibility_score": 50,
             "verdict": "Analysis Inconclusive",
             "confidence": 0.3,
-            "reasoning": "Unable to complete analysis due to a technical error during generation.",
-            "education_tips": ["Always verify information with multiple reliable sources.", "Be skeptical of emotionally charged content."]
+            "reasoning": f"Unable to complete analysis due to a technical error: {str(e)}",
+            "education_tips": ["Always verify information with multiple reliable sources.", "Technical errors can occur - try again or use alternative fact-checking methods."]
         }
+
+
 # --- FastAPI App and Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -244,10 +278,15 @@ async def logout(request: Request, response: Response):
 # --- Core API Routes ---
 @api_router.post("/analyze", response_model=AnalysisResult, summary="Analyze content for misinformation")
 async def analyze_content_endpoint(req: AnalysisRequest, user: Optional[User] = Depends(get_current_user)):
+    if not req.text and not req.image_base64:
+        raise HTTPException(status_code=400, detail="Either text or image must be provided")
+    
     content_text = req.text or "Image-only analysis"
     
+    # Perform analysis with DuckDuckGo search + Gemini
     analysis_data = await analyze_content_with_gemini(
-        content=content_text, image_base64=req.image_base64
+        content=content_text, 
+        image_base64=req.image_base64
     )
     
     content_type = "image" if req.image_base64 else "text"
@@ -257,6 +296,8 @@ async def analyze_content_endpoint(req: AnalysisRequest, user: Optional[User] = 
         content_type=content_type,
         **analysis_data
     )
+    
+    # Save to database
     await db.analyses.insert_one(result.dict())
     return result
 
@@ -273,6 +314,11 @@ async def get_analysis_history(user: User = Depends(get_current_user), limit: in
         analyses=[AnalysisResult(**analysis) for analysis in analyses],
         total_count=total_count
     )
+
+# --- Health Check Endpoint ---
+@api_router.get("/health", summary="Health check endpoint")
+async def health_check():
+    return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
 
 # --- Final App Configuration ---
 app.include_router(api_router)
