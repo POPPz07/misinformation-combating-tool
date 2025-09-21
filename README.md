@@ -22,7 +22,6 @@
 
 - Node.js & npm (for frontend)
 - Python 3.x (for backend)
-- [Optional: List any other dependencies like pipenv, virtualenv, etc.]
 
 ### Installation
 
