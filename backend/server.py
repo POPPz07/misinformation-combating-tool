@@ -16,6 +16,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from PIL import Image
 import google.generativeai as genai
+from google.generativeai import types
 from ddgs import DDGS
 import asyncio
 
