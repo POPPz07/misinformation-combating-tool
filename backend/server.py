@@ -225,10 +225,11 @@ async def analyze_content_with_gemini(content: str, image_base64: Optional[str])
     except Exception as e:
         logging.exception(f"Error during Gemini call: {e}")
         return {
-            "credibility_score": 50,
-            "verdict": "Analysis Inconclusive",
+            "credibilityScore": 50,
+            "statusLabel": "Analysis Inconclusive",
             "confidence": 0.3,
-            "reasoning": f"Unable to complete analysis due to a technical error: {str(e)}",
+            "analysisReasoning": f"Unable to complete analysis due to a technical error: {str(e)}",
+            "sourceLinks": [],
             "education_tips": ["Always verify information with multiple reliable sources.", "Technical errors can occur - try again or use alternative fact-checking methods."]
         }
 
