@@ -604,8 +604,8 @@ const HistoryPage = () => {
                   <div className="flex items-start justify-between">
                     <div className="flex-1">
                       <div className="flex items-center space-x-2 mb-2">
-                        <Badge variant={item.credibility_score >= 70 ? "default" : item.credibility_score >= 30 ? "secondary" : "destructive"}>
-                          {item.verdict}
+                        <Badge variant={item.credibilityScore >= 70 ? "default" : item.credibilityScore >= 30 ? "secondary" : "destructive"}>
+                          {item.statusLabel}
                         </Badge>
                         <span className="text-sm text-gray-500">
                           {new Date(item.timestamp).toLocaleDateString()}
@@ -614,7 +614,7 @@ const HistoryPage = () => {
                       <p className="text-gray-700 mb-2">{item.content}</p>
                       <div className="flex items-center space-x-4">
                         <span className="text-sm text-gray-600">
-                          Score: <span className="font-medium">{item.credibility_score}/100</span>
+                          Score: <span className="font-medium">{item.credibilityScore}/100</span>
                         </span>
                         <span className="text-sm text-gray-600">
                           Confidence: <span className="font-medium">{Math.round(item.confidence * 100)}%</span>
