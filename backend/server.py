@@ -138,11 +138,17 @@ async def analyze_content_with_gemini(content: str, image_base64: Optional[str])
        - Identify if the content contradicts established facts
        - Look for signs that the content might be from unreliable sources
     
-    3. **JSON OUTPUT ONLY:** You MUST respond with only a valid JSON object matching this structure:
-       - `credibility_score`: An integer from 0 (High Risk of Fake) to 100 (Likely True).
-       - `verdict`: A string, one of: "Likely True", "Potentially Misleading", "High Risk of Fake".
+    3. **GENERATE HIGH-AUTHORITY SOURCE LINKS:** You MUST provide 3-5 high-authority source links that support your analysis. These should be:
+       - From reputable sources (Wikipedia, Britannica, Reuters, BBC, academic institutions, government websites, etc.)
+       - Directly relevant to the claims being analyzed
+       - Actual verifiable URLs (use the search results provided to identify credible sources)
+    
+    4. **JSON OUTPUT ONLY:** You MUST respond with only a valid JSON object matching this structure:
+       - `credibilityScore`: An integer from 0 (High Risk of Fake) to 100 (Likely True).
+       - `statusLabel`: A string, one of: "Likely True", "Potentially Misleading", "High Risk of Fake".
        - `confidence`: A float from 0.0 to 1.0 representing your confidence in the assessment.
-       - `reasoning`: A detailed string explaining your verdict, referencing the search results where relevant. Explain any manipulative techniques used (e.g., emotional language, missing sources, logical fallacies).
+       - `analysisReasoning`: A detailed string explaining your verdict, referencing the search results where relevant. Explain any manipulative techniques used (e.g., emotional language, missing sources, logical fallacies).
+       - `sourceLinks`: A JSON array of 3-5 objects, each with "title" (string) and "url" (string) fields. These must be high-authority sources that support your analysis.
        - `education_tips`: A JSON array of 3-5 actionable string tips to help users identify similar misinformation in the future.
 
     Analyze for indicators like emotional manipulation, unreliable sources, manipulated data, suspicious context, and logical fallacies. For images, also consider signs of visual manipulation.
