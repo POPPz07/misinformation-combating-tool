@@ -61,15 +61,20 @@ class AnalysisRequest(BaseModel):
     text: Optional[str] = None
     image_base64: Optional[str] = None
 
+class SourceLink(BaseModel):
+    title: str
+    url: str
+
 class AnalysisResult(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: Optional[str] = None
     content: str
     content_type: str
-    credibility_score: int
-    verdict: str
+    credibilityScore: int
+    statusLabel: str
+    analysisReasoning: str
+    sourceLinks: List[SourceLink]
     confidence: float
-    reasoning: str
     education_tips: List[str]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
