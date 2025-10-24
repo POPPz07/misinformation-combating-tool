@@ -425,9 +425,44 @@ const WorkspacePage = () => {
                     <CardTitle>Analysis Reasoning</CardTitle>
                   </CardHeader>
                   <CardContent>
-                    <p className="text-gray-700 leading-relaxed">{result.reasoning}</p>
+                    <p className="text-gray-700 leading-relaxed">{result.analysisReasoning}</p>
                   </CardContent>
                 </Card>
+
+                {/* Source Links */}
+                {result.sourceLinks && result.sourceLinks.length > 0 && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="flex items-center">
+                        <ExternalLink className="h-5 w-5 mr-2" />
+                        Verifiable Sources
+                      </CardTitle>
+                      <CardDescription>
+                        High-authority sources that support this analysis
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-3">
+                        {result.sourceLinks.map((source, index) => (
+                          <li key={index} className="flex items-start border-l-2 border-blue-500 pl-3 py-1">
+                            <ExternalLink className="h-4 w-4 text-blue-500 mr-2 mt-0.5 flex-shrink-0" />
+                            <div>
+                              <a 
+                                href={source.url} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="text-sm font-medium text-blue-600 hover:text-blue-800 hover:underline"
+                              >
+                                {source.title}
+                              </a>
+                              <p className="text-xs text-gray-500 mt-0.5 break-all">{source.url}</p>
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                )}
 
                 {/* Education Tips */}
                 <Card>
