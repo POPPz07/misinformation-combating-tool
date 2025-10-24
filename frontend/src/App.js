@@ -389,8 +389,8 @@ const WorkspacePage = () => {
                   <CardHeader>
                     <CardTitle className="flex items-center justify-between">
                       <span>Analysis Results</span>
-                      <Badge variant={result.credibility_score >= 70 ? "default" : result.credibility_score >= 30 ? "secondary" : "destructive"}>
-                        {result.verdict}
+                      <Badge variant={result.credibilityScore >= 70 ? "default" : result.credibilityScore >= 30 ? "secondary" : "destructive"}>
+                        {result.statusLabel}
                       </Badge>
                     </CardTitle>
                   </CardHeader>
@@ -400,13 +400,13 @@ const WorkspacePage = () => {
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-sm font-medium">Credibility Score</span>
                           <div className="flex items-center space-x-2">
-                            {getScoreIcon(result.credibility_score)}
-                            <span className={`text-lg font-bold ${getScoreColor(result.credibility_score)}`}>
-                              {result.credibility_score}/100
+                            {getScoreIcon(result.credibilityScore)}
+                            <span className={`text-lg font-bold ${getScoreColor(result.credibilityScore)}`}>
+                              {result.credibilityScore}/100
                             </span>
                           </div>
                         </div>
-                        <Progress value={result.credibility_score} className="h-3" />
+                        <Progress value={result.credibilityScore} className="h-3" />
                       </div>
                       
                       <div>
