@@ -189,26 +189,36 @@ async def analyze_content_with_gemini(content: str, image_base64: Optional[str])
         try:
             result = json.loads(resp.text)
             # Validate the response structure
-            required_fields = ['credibility_score', 'verdict', 'confidence', 'reasoning', 'education_tips']
+            required_fields = ['credibilityScore', 'statusLabel', 'confidence', 'analysisReasoning', 'sourceLinks', 'education_tips']
             for field in required_fields:
                 if field not in result:
                     raise ValueError(f"Missing required field: {field}")
             
             # Ensure types are correct
-            result['credibility_score'] = int(result['credibility_score'])
+            result['credibilityScore'] = int(result['credibilityScore'])
             result['confidence'] = float(result['confidence'])
             if not isinstance(result['education_tips'], list):
                 result['education_tips'] = [result['education_tips']]
+            if not isinstance(result['sourceLinks'], list):
+                result['sourceLinks'] = []
+            
+            # Validate sourceLinks structure
+            validated_links = []
+            for link in result['sourceLinks']:
+                if isinstance(link, dict) and 'title' in link and 'url' in link:
+                    validated_links.append({'title': str(link['title']), 'url': str(link['url'])})
+            result['sourceLinks'] = validated_links
             
             return result
             
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logging.error(f"Error parsing Gemini response: {e}, Response text: {resp.text[:500]}")
             return {
-                "credibility_score": 50,
-                "verdict": "Analysis Inconclusive",
+                "credibilityScore": 50,
+                "statusLabel": "Analysis Inconclusive",
                 "confidence": 0.3,
-                "reasoning": f"Unable to parse analysis result. Raw response: {resp.text[:500]}",
+                "analysisReasoning": f"Unable to parse analysis result. Raw response: {resp.text[:500]}",
+                "sourceLinks": [],
                 "education_tips": ["Always verify information with multiple reliable sources.", "Be skeptical of content that cannot be properly analyzed."]
             }
 
