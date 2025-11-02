@@ -4,6 +4,8 @@
 .idea/
 .vscode/
 
+service-account-key.json
+
 # Dependencies
 node_modules/
 /node_modules

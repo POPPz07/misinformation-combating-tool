@@ -20,6 +20,9 @@ from google.generativeai import types
 from ddgs import DDGS
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from google import genai as vertex_genai
+from google.genai import types as vertex_types
+
 
 
 # --- Initial Setup ---
@@ -33,6 +36,9 @@ try:
     db_name = os.environ['DB_NAME']
     client = AsyncIOMotorClient(mongo_url)
     db = client[db_name]
+    PROJECT_ID = os.environ.get('GOOGLE_CLOUD_PROJECT')
+    LOCATION = os.environ.get('GOOGLE_CLOUD_LOCATION')
+    
 except KeyError as e:
     logging.error(f"FATAL: Environment variable {e} not found. Your .env file is incomplete.")
     exit()
@@ -42,6 +48,26 @@ except KeyError as e:
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 if not gemini_api_key:
     logging.error("FATAL: GEMINI_API_KEY not found in .env file.")
+
+try:
+    SERVICE_ACCOUNT_KEY_FILE = os.environ['SERVICE_ACCOUNT_KEY_FILE']
+    PROJECT_ID = os.environ['PROJECT_ID']
+    LOCATION = os.environ['LOCATION']
+
+    # Set Google credentials for authentication
+    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_ACCOUNT_KEY_FILE
+
+except KeyError as e:
+    logging.error(f"FATAL: Environment variable {e} not found. Your .env file is incomplete.")
+    exit()
+
+vertex_client = vertex_genai.Client(
+    vertexai=True,
+    project=PROJECT_ID,
+    location=LOCATION,
+    http_options=vertex_types.HttpOptions(timeout=60_000)
+)
+
 
 
 # --- Pydantic Models (Data Structures) ---
@@ -86,6 +112,62 @@ class AnalysisResult(BaseModel):
 class HistoryResponse(BaseModel):
     analyses: List[AnalysisResult]
     total_count: int
+
+class FactCheckRequest(BaseModel):
+    claim: str
+
+class FactCheckResponse(BaseModel):
+    claim: str
+    analysis: str
+    sources: List[SourceLink]
+
+async def fact_check_with_flashlite(claim: str) -> dict:
+    """
+    Uses Gemini 2.5 Flash-Lite with Google Search grounding to verify a factual claim.
+    Returns summarized text + list of sources.
+    """
+    try:
+        google_search_tool = vertex_types.Tool(google_search=vertex_types.GoogleSearch())
+
+        # Run in thread executor to avoid blocking
+        loop = asyncio.get_event_loop()
+
+        def run_vertex():
+            response_text = ""
+            last_chunk = None
+
+            for chunk in vertex_client.models.generate_content_stream(
+                model="gemini-2.5-flash-lite",
+                contents=claim,
+                config=vertex_types.GenerateContentConfig(
+                    tools=[google_search_tool],
+                    temperature=0.0
+                )
+            ):
+                if chunk.text:
+                    response_text += chunk.text
+                last_chunk = chunk
+
+            sources = []
+            if last_chunk and last_chunk.candidates and last_chunk.candidates[0].grounding_metadata:
+                metadata = last_chunk.candidates[0].grounding_metadata
+                if metadata.grounding_chunks:
+                    for c in metadata.grounding_chunks:
+                        if c.web:
+                            sources.append({"title": c.web.title, "url": c.web.uri})
+            return {"analysis": response_text.strip(), "sources": sources}
+
+        with ThreadPoolExecutor() as pool:
+            result = await loop.run_in_executor(pool, run_vertex)
+        return result
+
+    except Exception as e:
+        logging.exception(f"Error during Flash-Lite fact check: {e}")
+        return {
+            "analysis": f"Error: {str(e)}",
+            "sources": []
+        }
+
 
 
 # --- DuckDuckGo Search Function ---
@@ -358,6 +440,32 @@ async def analyze_content_endpoint(req: AnalysisRequest, user: Optional[User] = 
     # Save to database
     await db.analyses.insert_one(result.dict())
     return result
+
+@api_router.post("/factcheck", response_model=FactCheckResponse, summary="Verify a factual claim using Gemini 2.5 Flash-Lite")
+async def fact_check_endpoint(req: FactCheckRequest, user: Optional[User] = Depends(get_current_user)):
+    if not req.claim or len(req.claim.strip()) == 0:
+        raise HTTPException(status_code=400, detail="Claim text must be provided.")
+
+    logging.info(f"Fact-checking claim: {req.claim}")
+    result = await fact_check_with_flashlite(req.claim)
+
+    response = FactCheckResponse(
+        claim=req.claim,
+        analysis=result.get("analysis", ""),
+        sources=[SourceLink(**src) for src in result.get("sources", [])]
+    )
+
+    # Optionally store result in DB
+    await db.factchecks.insert_one({
+        "user_id": user.id if user else None,
+        "claim": req.claim,
+        "analysis": response.analysis,
+        "sources": [s.dict() for s in response.sources],
+        "timestamp": datetime.now(timezone.utc)
+    })
+
+    return response
+
 
 
 @api_router.get("/history", response_model=HistoryResponse, summary="Get user's analysis history")

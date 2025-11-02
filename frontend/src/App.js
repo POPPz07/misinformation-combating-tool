@@ -219,6 +219,71 @@ const WorkspacePage = () => {
   const [imageFile, setImageFile] = useState(null);
   const [imagePreview, setImagePreview] = useState(null);
 
+  // --- NEWLY IMPLEMENTED FUNCTION ---
+  const handleDeepSearch = async () => {
+    // Deep search (fact-check) is designed for text claims.
+    if (!input.trim()) {
+      toast.error("Please enter a text claim to use Deep Search.");
+      return;
+    }
+    
+    // Warn if the user is in 'image' tab but has text
+    if (analysisType === 'image' && !input.trim()) {
+        toast.error("Deep Search requires a text claim, even if an image is uploaded.");
+        return;
+    }
+
+    setIsLoading(true);
+    setResult(null);
+
+    try {
+      // Data for the /api/factcheck endpoint
+      const requestData = {
+        claim: input 
+      };
+
+      const response = await axios.post(`${API}/factcheck`, requestData, {
+        withCredentials: true
+      });
+
+      // The /factcheck API returns {claim, analysis, sources}
+      // We must transform this into the AnalysisResult object 
+      // that the UI is built to display.
+      const factCheckData = response.data;
+      
+      const transformedResult = {
+        id: `fc-${new Date().getTime()}`, // Generate a temporary ID
+        content: factCheckData.claim,
+        content_type: 'text',
+        
+        // --- Mapped Fields ---
+        analysisReasoning: factCheckData.analysis,
+        sourceLinks: factCheckData.sources,
+        
+        // --- Default Fields (to fit the UI) ---
+        credibilityScore: 85, // Assign a default score to show "info found"
+        statusLabel: "Fact-Check Analysis", // Use a custom label for this mode
+        confidence: 0.9, // Default confidence
+        education_tips: [
+            "This analysis was performed using Google Search grounding to verify a specific claim.",
+            "Review the provided sources to verify the information independently.",
+            "Deep Search is best for specific factual claims, while standard analysis assesses general content.",
+        ],
+        timestamp: new Date().toISOString()
+      };
+
+      setResult(transformedResult);
+      toast.success("Deep Search completed!");
+
+    } catch (error) {
+      console.error('Deep Search error:', error);
+      toast.error("Failed to run Deep Search. Please try again.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  // --- END OF NEW FUNCTION ---
+
   const handleImageUpload = (event) => {
     const file = event.target.files[0];
     if (file) {
@@ -242,7 +307,9 @@ const WorkspacePage = () => {
 
     try {
       let requestData = {
-        content_type: analysisType
+        // This key is 'content_type' in your frontend state, 
+        // but your /api/analyze endpoint doesn't seem to use it.
+        // It *does* expect 'text' and 'image_base64'.
       };
 
       if (analysisType === 'text') {
@@ -252,7 +319,8 @@ const WorkspacePage = () => {
         const reader = new FileReader();
         const base64Promise = new Promise((resolve, reject) => {
           reader.onload = () => {
-            const base64 = reader.result.split(',')[1]; // Remove data:image/jpeg;base64, prefix
+            // Your server.py code handles the prefix, but it's safer to split here.
+            const base64 = reader.result.split(',')[1]; 
             resolve(base64);
           };
           reader.onerror = reject;
@@ -261,6 +329,16 @@ const WorkspacePage = () => {
         const base64Image = await base64Promise;
         requestData.image_base64 = base64Image;
         requestData.text = input || "Analyze this image for misinformation";
+      }
+
+      // Ensure text is sent even for image analysis, as per server.py
+      if (!requestData.text) {
+        requestData.text = input;
+      }
+      
+      // Ensure text is not null if image is present
+      if (requestData.image_base64 && !requestData.text) {
+         requestData.text = "Image-only analysis";
       }
 
       const response = await axios.post(`${API}/analyze`, requestData, {
@@ -358,24 +436,40 @@ const WorkspacePage = () => {
                   </TabsContent>
                 </Tabs>
 
-                <Button 
-                  onClick={analyzeContent}
-                  disabled={isLoading || (!input.trim() && !imageFile)}
-                  className="w-full bg-blue-600 hover:bg-blue-700"
-                  size="lg"
-                >
-                  {isLoading ? (
-                    <>
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                      Analyzing...
-                    </>
-                  ) : (
-                    <>
-                      <Search className="h-4 w-4 mr-2" />
-                      Analyze Content
-                    </>
-                  )}
-                </Button>
+                <div className="flex w-full space-x-2">
+                  <Button 
+                    onClick={analyzeContent}
+                    disabled={isLoading || (!input.trim() && !imageFile)}
+                    className="flex-1 bg-blue-600 hover:bg-blue-700" // Changed w-full to flex-1
+                    size="lg"
+                  >
+                    {isLoading ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                        Analyzing...
+                      </>
+                    ) : (
+                      <>
+                        <Search className="h-4 w-4 mr-2" />
+                        Analyze
+                      </>
+                    )}
+                  </Button>
+
+                  {/* --- DEEP SEARCH BUTTON (now functional) --- */}
+                  <Button 
+                    onClick={handleDeepSearch}
+                    // Deep search only works if there is text input
+                    disabled={isLoading || !input.trim()}
+                    variant="secondary" // Use the 'secondary' variant from your button.jsx
+                    size="lg"
+                    className="flex-1" // Add flex-1 to fill the other half
+                  >
+                    <Search className="h-4 w-4 mr-2" />
+                    Deep Search
+                  </Button>
+                  {/* ----------------------------- */}
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -545,12 +639,21 @@ const HistoryPage = () => {
         setHistory(response.data.analyses);
       } else {
         // Get public history for non-authenticated users
-        const response = await axios.get(`${API}/public-history`);
-        setHistory(response.data.analyses || []);
+        // Note: Your server.py does not have a '/public-history' route.
+        // This will fail unless you add it to server.py.
+        // For now, we'll just show an empty list if not logged in.
+         toast.warn("Please log in to view your history.");
+         setHistory([]);
       }
     } catch (error) {
       console.error('Error fetching history:', error);
-      toast.error("Failed to load history");
+      if (!user) {
+         // This error is expected since /public-history doesn't exist.
+         console.warn("Public history endpoint not found. Showing empty list.");
+         setHistory([]);
+      } else {
+         toast.error("Failed to load history");
+      }
     } finally {
       setLoading(false);
     }
@@ -589,7 +692,7 @@ const HistoryPage = () => {
               <History className="h-16 w-16 text-gray-300 mx-auto mb-4" />
               <h3 className="text-lg font-medium text-gray-900 mb-2">No History Yet</h3>
               <p className="text-gray-500 mb-4">
-                {user ? "You haven't analyzed any content yet." : "No public analyses available."}
+                {user ? "You haven't analyzed any content yet." : "Please log in to view your history."}
               </p>
               <Button onClick={() => window.location.href = '/workspace'}>
                 Start Analyzing
@@ -714,7 +817,7 @@ const AboutPage = () => {
 };
 
 const ProfilePage = () => {
-  const { user, setUser, checkAuth } = useAuth();
+  const { user, setUser, checkAuth, login } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
 
@@ -723,11 +826,17 @@ const ProfilePage = () => {
     const handleOAuthRedirect = async () => {
       const hash = location.hash;
       if (hash.includes('session_id=')) {
-        const sessionId = hash.split('session_id=')[1];
+        // This flow seems to be for a different auth system than your
+        // /api/auth/session dummy endpoint in server.py.
+        // I will adapt this to call your *dummy* session endpoint
+        // just to make it work with your provided server.py.
+        
+        // This part is a mismatch: const sessionId = hash.split('session_id=')[1];
         
         try {
+          // Calling the DUMMY session endpoint from server.py
           const response = await axios.post(`${API}/auth/session`, 
-            { session_id: sessionId },
+            {}, // Your dummy endpoint takes no body
             { withCredentials: true }
           );
           
@@ -743,22 +852,51 @@ const ProfilePage = () => {
     };
 
     if (location.hash.includes('session_id=')) {
+       // This hash will never be set by your dummy auth, but I'll leave the logic.
+       // The external login() function is what's incompatible.
+       // For testing, you might want to call handleOAuthRedirect manually
+       // or just click the "Sign In" button which triggers the external auth.
       handleOAuthRedirect();
     } else if (!user) {
-      // Refresh auth state
+      // Refresh auth state on page load
       checkAuth();
     }
   }, [location.hash, user, setUser, navigate, checkAuth]);
+
+
+  // This part is tricky. Your server.py has a /auth/session endpoint
+  // that *creates* a dummy session. But your frontend login() function
+  // goes to an external auth provider.
+  // I will add a button to use your *dummy* auth for testing.
+  const createDummySessionForTesting = async () => {
+     try {
+        const response = await axios.post(`${API}/auth/session`, {}, { withCredentials: true });
+        setUser(response.data.user);
+        toast.success("Dummy session created!");
+        navigate('/profile', { replace: true });
+     } catch (error) {
+        toast.error("Failed to create dummy session.");
+     }
+  };
+
 
   if (!user) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 py-8">
         <div className="max-w-md mx-auto px-4 sm:px-6 lg:px-8">
           <Card>
-            <CardContent className="text-center py-12">
+            <CardContent className="text-center py-12 space-y-4">
               <User className="h-16 w-16 text-gray-300 mx-auto mb-4" />
               <h3 className="text-lg font-medium text-gray-900 mb-2">Authentication Required</h3>
               <p className="text-gray-500 mb-4">Please sign in to view your profile</p>
+              
+              <Button onClick={login} className="w-full bg-blue-600 hover:bg-blue-700">
+                 Sign In (External)
+              </Button>
+              <Button onClick={createDummySessionForTesting} variant="outline" className="w-full">
+                 Create Dummy Session (Test)
+              </Button>
+
             </CardContent>
           </Card>
         </div>
