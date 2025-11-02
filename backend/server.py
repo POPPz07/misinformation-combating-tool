@@ -25,9 +25,11 @@ from google.genai import types as vertex_types
 
 
 
+
 # --- Initial Setup ---
 load_dotenv('.env')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 
 # --- Database Connection ---
@@ -44,22 +46,27 @@ except KeyError as e:
     exit()
 
 
+
 # --- Gemini API Configuration ---
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 if not gemini_api_key:
     logging.error("FATAL: GEMINI_API_KEY not found in .env file.")
+
 
 try:
     SERVICE_ACCOUNT_KEY_FILE = os.environ['SERVICE_ACCOUNT_KEY_FILE']
     PROJECT_ID = os.environ['PROJECT_ID']
     LOCATION = os.environ['LOCATION']
 
+
     # Set Google credentials for authentication
     os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_ACCOUNT_KEY_FILE
+
 
 except KeyError as e:
     logging.error(f"FATAL: Environment variable {e} not found. Your .env file is incomplete.")
     exit()
+
 
 vertex_client = vertex_genai.Client(
     vertexai=True,
@@ -67,6 +74,7 @@ vertex_client = vertex_genai.Client(
     location=LOCATION,
     http_options=vertex_types.HttpOptions(timeout=60_000)
 )
+
 
 
 
@@ -78,6 +86,7 @@ class User(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+
 class Session(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     user_id: str
@@ -85,14 +94,17 @@ class Session(BaseModel):
     expires_at: datetime
 
 
+
 class AnalysisRequest(BaseModel):
     text: Optional[str] = None
     image_base64: Optional[str] = None
 
 
+
 class SourceLink(BaseModel):
     title: str
     url: str
+
 
 
 class AnalysisResult(BaseModel):
@@ -109,17 +121,21 @@ class AnalysisResult(BaseModel):
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+
 class HistoryResponse(BaseModel):
     analyses: List[AnalysisResult]
     total_count: int
 
+
 class FactCheckRequest(BaseModel):
     claim: str
+
 
 class FactCheckResponse(BaseModel):
     claim: str
     analysis: str
     sources: List[SourceLink]
+
 
 async def fact_check_with_flashlite(claim: str) -> dict:
     """
@@ -129,12 +145,15 @@ async def fact_check_with_flashlite(claim: str) -> dict:
     try:
         google_search_tool = vertex_types.Tool(google_search=vertex_types.GoogleSearch())
 
+
         # Run in thread executor to avoid blocking
         loop = asyncio.get_event_loop()
+
 
         def run_vertex():
             response_text = ""
             last_chunk = None
+
 
             for chunk in vertex_client.models.generate_content_stream(
                 model="gemini-2.5-flash-lite",
@@ -148,6 +167,7 @@ async def fact_check_with_flashlite(claim: str) -> dict:
                     response_text += chunk.text
                 last_chunk = chunk
 
+
             sources = []
             if last_chunk and last_chunk.candidates and last_chunk.candidates[0].grounding_metadata:
                 metadata = last_chunk.candidates[0].grounding_metadata
@@ -157,9 +177,11 @@ async def fact_check_with_flashlite(claim: str) -> dict:
                             sources.append({"title": c.web.title, "url": c.web.uri})
             return {"analysis": response_text.strip(), "sources": sources}
 
+
         with ThreadPoolExecutor() as pool:
             result = await loop.run_in_executor(pool, run_vertex)
         return result
+
 
     except Exception as e:
         logging.exception(f"Error during Flash-Lite fact check: {e}")
@@ -167,6 +189,7 @@ async def fact_check_with_flashlite(claim: str) -> dict:
             "analysis": f"Error: {str(e)}",
             "sources": []
         }
+
 
 
 
@@ -189,6 +212,7 @@ async def search_with_ddgs(query: str, max_results: int = 5) -> List[dict]:
         return []
 
 
+
 # --- Updated Gemini Analysis Function ---
 async def analyze_content_with_gemini(content: str, image_base64: Optional[str]) -> dict:
     """
@@ -199,14 +223,17 @@ async def analyze_content_with_gemini(content: str, image_base64: Optional[str])
     if not gemini_api_key:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY is not configured on the server.")
 
+
     # Configure Gemini (replaces old genai.Client)
     genai.configure(api_key=gemini_api_key)
+
 
     # --- Perform contextual search via DuckDuckGo ---
     search_results = []
     if content and len(content.strip()) > 0:
         search_query = content[:200] if len(content) > 200 else content
         search_results = await search_with_ddgs(search_query, max_results=5)
+
 
     # --- Build search context for model ---
     search_context = ""
@@ -218,9 +245,11 @@ async def analyze_content_with_gemini(content: str, image_base64: Optional[str])
             href = result.get('href', 'No URL')
             search_context += f"\n{idx}. Title: {title}\n   URL: {href}\n   Summary: {body}\n"
 
+
     # --- System prompt ---
     system_prompt = f"""You are TruthLens, an expert AI misinformation detection system. 
 Your primary goal is to analyze content (text or images) and determine its credibility with high accuracy.
+
 
 **CRITICAL INSTRUCTIONS:**
 1. **ANALYZE THE CONTENT:** Carefully analyze the provided content for credibility, checking for signs of misinformation, manipulation, or false claims.
@@ -234,23 +263,36 @@ Your primary goal is to analyze content (text or images) and determine its credi
    - `sourceLinks`: Array of 3–5 dicts each with "title" and "url"
    - `education_tips`: Array of 3–5 strings with user education advice
 
+
 Analyze for emotional manipulation, unreliable sources, logical fallacies, or altered visuals.
+
 
 {search_context}"""
 
+    # <-- FIX: Logic moved here to correctly build the 'user_content_list'
+    # This list will be passed to the sync function.
+    
     # --- Build Gemini contents (text-only or image + text) ---
+    pil_image = None
+    user_content_list = [system_prompt] # Start with the system prompt
+
     if image_base64:
         if "," in image_base64:
             image_base64 = image_base64.split(",", 1)[1]
         try:
             image_bytes = base64.b64decode(image_base64)
-            img = Image.open(io.BytesIO(image_bytes))
-            contents = [f"Analyze this image. Accompanying text: {content[:500] if content else 'No text'}", img]
+            pil_image = Image.open(io.BytesIO(image_bytes))
+            
+            # Add text and image to the content list
+            user_content_list.append(f"Analyze this image. Accompanying text: {content[:500] if content else 'No text'}")
+            user_content_list.append(pil_image)
         except Exception as e:
             logging.error(f"Error processing image: {e}")
-            contents = [f"Analyze this text (image processing failed): {content[:4000]}"]
+            user_content_list.append(f"Analyze this text (image processing failed): {content[:4000]}")
     else:
-        contents = [f"Analyze this text: {content[:4000]}"]
+        # Add text-only to the content list
+        user_content_list.append(f"Analyze this text: {content[:4000]}")
+
 
     # --- Configure generation settings ---
     config = types.GenerationConfig(
@@ -259,33 +301,32 @@ Analyze for emotional manipulation, unreliable sources, logical fallacies, or al
         temperature=0.3
     )
 
+
     try:
         # Use synchronous Gemini call in executor to avoid blocking async event loop
-        def run_gemini():
-            model = genai.GenerativeModel("gemini-2.0-flash-exp")
+        def run_gemini_sync(prepared_contents: List): # <-- FIX: Accept prepared list
+            
+            # <-- FIX: Wrong model name. 'gemini-1.5-flash' is the correct public model.
+            model = genai.GenerativeModel("gemini-2.5-flash-lite")
 
-            # Build contents list as strings; put system instruction as first item
-            contents = [system_prompt]
-
-            if image_base64:
-                # For simplicity, just include the descriptive text for the image
-                contents.append(f"Analyze this image. Accompanying text: {content[:500] if content else 'No text'}")
-            else:
-                contents.append(f"Analyze this text: {content[:4000]}")
-
+            # <-- FIX: This function no longer builds its own contents.
+            # It uses the list passed to it, which correctly includes the image.
             return model.generate_content(
-                contents=contents,
+                contents=prepared_contents,
                 generation_config=config,
             )
 
 
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor() as pool:
-            resp = await loop.run_in_executor(pool, run_gemini)
+            # <-- FIX: Pass the 'user_content_list' as an argument
+            resp = await loop.run_in_executor(pool, run_gemini_sync, user_content_list)
+
 
         # --- Parse model response ---
         try:
             result = json.loads(resp.text)
+
 
             # Validate required fields
             required_fields = [
@@ -296,14 +337,17 @@ Analyze for emotional manipulation, unreliable sources, logical fallacies, or al
                 if field not in result:
                     raise ValueError(f"Missing required field: {field}")
 
+
             # Type normalization
             result['credibilityScore'] = int(result['credibilityScore'])
             result['confidence'] = float(result['confidence'])
+
 
             if not isinstance(result.get('education_tips'), list):
                 result['education_tips'] = [result['education_tips']]
             if not isinstance(result.get('sourceLinks'), list):
                 result['sourceLinks'] = []
+
 
             # Validate link structure
             validated_links = []
@@ -315,7 +359,9 @@ Analyze for emotional manipulation, unreliable sources, logical fallacies, or al
                     })
             result['sourceLinks'] = validated_links
 
+
             return result
+
 
         except (json.JSONDecodeError, ValueError, KeyError) as e:
             logging.error(f"Error parsing Gemini response: {e}, Response text: {resp.text[:500]}")
@@ -330,6 +376,7 @@ Analyze for emotional manipulation, unreliable sources, logical fallacies, or al
                     "Be skeptical of content that cannot be properly analyzed."
                 ]
             }
+
 
     except Exception as e:
         logging.exception(f"Error during Gemini call: {e}")
@@ -346,6 +393,7 @@ Analyze for emotional manipulation, unreliable sources, logical fallacies, or al
         }
 
 
+
 # --- FastAPI App and Lifespan Manager ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -355,9 +403,11 @@ async def lifespan(app: FastAPI):
     client.close()
 
 
+
 app = FastAPI(title="TruthLens API", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 security = HTTPBearer(auto_error=False)
+
 
 
 # --- Authentication Helpers & Routes (Dummy Implementation) ---
@@ -366,6 +416,7 @@ async def get_current_user(request: Request) -> Optional[User]:
     if not session_token:
         return None
 
+
     session = await db.sessions.find_one({
         "session_token": session_token,
         "expires_at": {"$gt": datetime.now(timezone.utc)}
@@ -373,8 +424,10 @@ async def get_current_user(request: Request) -> Optional[User]:
     if not session:
         return None
 
+
     user_data = await db.users.find_one({"id": session["user_id"]})
     return User(**user_data) if user_data else None
+
 
 
 @api_router.post("/auth/session", summary="Create a dummy session for testing")
@@ -387,10 +440,12 @@ async def create_dummy_session(response: Response):
     else:
         user = User(**user_data)
 
+
     session_token = f"st_dummy_{uuid.uuid4()}"
     expires_at = datetime.now(timezone.utc) + timedelta(days=7)
     session_obj = Session(user_id=user.id, session_token=session_token, expires_at=expires_at)
     await db.sessions.insert_one(session_obj.dict())
+
 
     response.set_cookie(
         "session_token", session_token, max_age=7*24*3600, httponly=True,
@@ -399,11 +454,13 @@ async def create_dummy_session(response: Response):
     return {"user": user.dict()}
 
 
+
 @api_router.get("/auth/me", summary="Get current user info")
 async def get_current_user_info(user: User = Depends(get_current_user)):
     if not user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     return user
+
 
 
 @api_router.post("/auth/logout", summary="Log out the user")
@@ -415,19 +472,23 @@ async def logout(request: Request, response: Response):
     return {"message": "Logged out successfully"}
 
 
+
 # --- Core API Routes ---
 @api_router.post("/analyze", response_model=AnalysisResult, summary="Analyze content for misinformation")
 async def analyze_content_endpoint(req: AnalysisRequest, user: Optional[User] = Depends(get_current_user)):
     if not req.text and not req.image_base64:
         raise HTTPException(status_code=400, detail="Either text or image must be provided")
 
+
     content_text = req.text or "Image-only analysis"
+
 
     # Perform analysis with DuckDuckGo search + Gemini
     analysis_data = await analyze_content_with_gemini(
         content=content_text,
         image_base64=req.image_base64
     )
+
 
     content_type = "image" if req.image_base64 else "text"
     result = AnalysisResult(
@@ -437,23 +498,28 @@ async def analyze_content_endpoint(req: AnalysisRequest, user: Optional[User] = 
         **analysis_data
     )
 
+
     # Save to database
     await db.analyses.insert_one(result.dict())
     return result
+
 
 @api_router.post("/factcheck", response_model=FactCheckResponse, summary="Verify a factual claim using Gemini 2.5 Flash-Lite")
 async def fact_check_endpoint(req: FactCheckRequest, user: Optional[User] = Depends(get_current_user)):
     if not req.claim or len(req.claim.strip()) == 0:
         raise HTTPException(status_code=400, detail="Claim text must be provided.")
 
+
     logging.info(f"Fact-checking claim: {req.claim}")
     result = await fact_check_with_flashlite(req.claim)
+
 
     response = FactCheckResponse(
         claim=req.claim,
         analysis=result.get("analysis", ""),
         sources=[SourceLink(**src) for src in result.get("sources", [])]
     )
+
 
     # Optionally store result in DB
     await db.factchecks.insert_one({
@@ -464,7 +530,9 @@ async def fact_check_endpoint(req: FactCheckRequest, user: Optional[User] = Depe
         "timestamp": datetime.now(timezone.utc)
     })
 
+
     return response
+
 
 
 
@@ -473,9 +541,11 @@ async def get_analysis_history(user: User = Depends(get_current_user), limit: in
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
 
+
     analyses_cursor = db.analyses.find({"user_id": user.id}).sort("timestamp", -1).skip(skip).limit(limit)
     analyses = await analyses_cursor.to_list(length=limit)
     total_count = await db.analyses.count_documents({"user_id": user.id})
+
 
     return HistoryResponse(
         analyses=[AnalysisResult(**analysis) for analysis in analyses],
@@ -483,10 +553,12 @@ async def get_analysis_history(user: User = Depends(get_current_user), limit: in
     )
 
 
+
 # --- Health Check Endpoint ---
 @api_router.get("/health", summary="Health check endpoint")
 async def health_check():
     return {"status": "healthy", "timestamp": datetime.now(timezone.utc).isoformat()}
+
 
 
 # --- Final App Configuration ---
