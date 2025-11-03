@@ -1,0 +1,21 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment & Secrets
+venv/
+.env  # <-- THIS IS THE FIX
+*.log
+*.tmp
+service-account-key.json
+*.pem
+*.key
+
+# OS & Git
+.DS_Store
+.git/
+.gitignore
+
+# Other files
+server2.py

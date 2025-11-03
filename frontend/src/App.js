@@ -11,39 +11,71 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { toast } from "sonner";
 import { Toaster } from "./components/ui/sonner";
 import "./App.css";
+import { auth, googleProvider, signInWithPopup, signOut } from "./firebase";
+import { onAuthStateChanged } from "firebase/auth"; // <-- ADD THIS LINE
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = BACKEND_URL;
+
+// --- NEW: Axios Interceptor ---
+// This magic function attaches your token to every API request
+axios.interceptors.request.use(async (config) => {
+  const user = auth.currentUser;
+  if (user) {
+    const token = await user.getIdToken();
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+}, (error) => {
+  return Promise.reject(error);
+});
+
 // Auth Context
 const AuthContext = React.createContext();
 
+// --- NEW: Rewritten AuthProvider ---
 const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Listen for Firebase auth state changes
   useEffect(() => {
-    checkAuth();
+    const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      if (firebaseUser) {
+        // User is signed in.
+        // Let's get their profile from *our* backend to sync it.
+        try {
+          const response = await axios.get(`${API}/auth/me`);
+          setUser(response.data); // Set user from our Firestore DB
+          toast.success(`Welcome back, ${response.data.name || response.data.email}!`);
+        } catch (error) {
+          console.error("Error fetching user profile:", error);
+          setUser(null);
+        }
+      } else {
+        // User is signed out.
+        setUser(null);
+      }
+      setLoading(false);
+    });
+
+    // Cleanup subscription on unmount
+    return () => unsubscribe();
   }, []);
 
-  const checkAuth = async () => {
+  const login = async () => {
     try {
-      const response = await axios.get(`${API}/auth/me`, { withCredentials: true });
-      setUser(response.data);
+      await signInWithPopup(auth, googleProvider);
+      // The onAuthStateChanged listener above will handle the rest.
     } catch (error) {
-      setUser(null);
-    } finally {
-      setLoading(false);
+      console.error('Google login error:', error);
+      toast.error("Login failed. Please try again.");
     }
-  };
-
-  const login = () => {
-    const redirectUrl = encodeURIComponent(window.location.origin + '/profile');
-    window.location.href = `https://auth.emergentagent.com/?redirect=${redirectUrl}`;
   };
 
   const logout = async () => {
     try {
-      await axios.post(`${API}/auth/logout`, {}, { withCredentials: true });
+      await signOut(auth);
       setUser(null);
       toast.success("Logged out successfully!");
     } catch (error) {
@@ -51,8 +83,10 @@ const AuthProvider = ({ children }) => {
     }
   };
 
+  // We no longer need checkAuth, as onAuthStateChanged handles it.
+
   return (
-    <AuthContext.Provider value={{ user, setUser, login, logout, loading, checkAuth }}>
+    <AuthContext.Provider value={{ user, setUser, login, logout, loading }}>
       {children}
     </AuthContext.Provider>
   );
@@ -242,9 +276,7 @@ const WorkspacePage = () => {
         claim: input 
       };
 
-      const response = await axios.post(`${API}/factcheck`, requestData, {
-        withCredentials: true
-      });
+      const response = await axios.post(`${API}/factcheck`, requestData);
 
       // The /factcheck API returns {claim, analysis, sources}
       // We must transform this into the AnalysisResult object 
@@ -341,9 +373,7 @@ const WorkspacePage = () => {
          requestData.text = "Image-only analysis";
       }
 
-      const response = await axios.post(`${API}/analyze`, requestData, {
-        withCredentials: true
-      });
+      const response = await axios.post(`${API}/analyze`, requestData);
 
       setResult(response.data);
       toast.success("Analysis completed!");
@@ -635,7 +665,7 @@ const HistoryPage = () => {
   const fetchHistory = async () => {
     try {
       if (user) {
-        const response = await axios.get(`${API}/history`, { withCredentials: true });
+        const response = await axios.get(`${API}/history`);
         setHistory(response.data.analyses);
       } else {
         // Get public history for non-authenticated users
@@ -817,86 +847,35 @@ const AboutPage = () => {
 };
 
 const ProfilePage = () => {
-  const { user, setUser, checkAuth, login } = useAuth();
+  const { user, setUser, checkAuth, login, loading } = useAuth();
   const location = useLocation();
   const navigate = useNavigate();
-
-  useEffect(() => {
-    // Handle OAuth redirect
-    const handleOAuthRedirect = async () => {
-      const hash = location.hash;
-      if (hash.includes('session_id=')) {
-        // This flow seems to be for a different auth system than your
-        // /api/auth/session dummy endpoint in server.py.
-        // I will adapt this to call your *dummy* session endpoint
-        // just to make it work with your provided server.py.
-        
-        // This part is a mismatch: const sessionId = hash.split('session_id=')[1];
-        
-        try {
-          // Calling the DUMMY session endpoint from server.py
-          const response = await axios.post(`${API}/auth/session`, 
-            {}, // Your dummy endpoint takes no body
-            { withCredentials: true }
-          );
-          
-          setUser(response.data.user);
-          toast.success("Successfully logged in!");
-          navigate('/profile', { replace: true });
-        } catch (error) {
-          console.error('Session creation error:', error);
-          toast.error("Login failed. Please try again.");
-          navigate('/', { replace: true });
-        }
-      }
-    };
-
-    if (location.hash.includes('session_id=')) {
-       // This hash will never be set by your dummy auth, but I'll leave the logic.
-       // The external login() function is what's incompatible.
-       // For testing, you might want to call handleOAuthRedirect manually
-       // or just click the "Sign In" button which triggers the external auth.
-      handleOAuthRedirect();
-    } else if (!user) {
-      // Refresh auth state on page load
-      checkAuth();
-    }
-  }, [location.hash, user, setUser, navigate, checkAuth]);
-
-
-  // This part is tricky. Your server.py has a /auth/session endpoint
-  // that *creates* a dummy session. But your frontend login() function
-  // goes to an external auth provider.
-  // I will add a button to use your *dummy* auth for testing.
-  const createDummySessionForTesting = async () => {
-     try {
-        const response = await axios.post(`${API}/auth/session`, {}, { withCredentials: true });
-        setUser(response.data.user);
-        toast.success("Dummy session created!");
-        navigate('/profile', { replace: true });
-     } catch (error) {
-        toast.error("Failed to create dummy session.");
-     }
-  };
-
-
+// Show a loading spinner while Firebase checks auth state
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 py-8">
+        <div className="max-w-md mx-auto px-4 sm:px-6 lg:px-8">
+          <Card>
+            <CardContent className="text-center py-12">
+              <div className="animate-spin rounded-full h-16 w-16 border-b-2 border-blue-600 mx-auto mb-4"></div>
+              <h3 className="text-lg font-medium text-gray-900">Loading Profile...</h3>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    );
+  }
+// If not loading and no user, show "Auth Required"
   if (!user) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 py-8">
         <div className="max-w-md mx-auto px-4 sm:px-6 lg:px-8">
           <Card>
-            <CardContent className="text-center py-12 space-y-4">
+            <CardContent className="text-center py-12">
               <User className="h-16 w-16 text-gray-300 mx-auto mb-4" />
               <h3 className="text-lg font-medium text-gray-900 mb-2">Authentication Required</h3>
               <p className="text-gray-500 mb-4">Please sign in to view your profile</p>
-              
-              <Button onClick={login} className="w-full bg-blue-600 hover:bg-blue-700">
-                 Sign In (External)
-              </Button>
-              <Button onClick={createDummySessionForTesting} variant="outline" className="w-full">
-                 Create Dummy Session (Test)
-              </Button>
-
+              {/* You can add a login button here if you want */}
             </CardContent>
           </Card>
         </div>
@@ -904,6 +883,7 @@ const ProfilePage = () => {
     );
   }
 
+  // If not loading and we have a user, show the profile
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-blue-50 py-8">
       <div className="max-w-2xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -916,13 +896,7 @@ const ProfilePage = () => {
           </CardHeader>
           <CardContent>
             <div className="flex items-center space-x-4 mb-6">
-              {user.picture && (
-                <img 
-                  src={user.picture} 
-                  alt={user.name}
-                  className="h-16 w-16 rounded-full"
-                />
-              )}
+              {/* We use the 'name' and 'email' from our backend user object */}
               <div>
                 <h2 className="text-xl font-bold text-gray-900">{user.name}</h2>
                 <p className="text-gray-600">{user.email}</p>
@@ -954,7 +928,7 @@ const ProfilePage = () => {
   );
 };
 
-// Main App
+// --- Main App (No changes) ---
 function App() {
   return (
     <AuthProvider>

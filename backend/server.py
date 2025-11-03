@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field
 from PIL import Image
 import google.generativeai as genai
@@ -22,29 +21,58 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from google import genai as vertex_genai
 from google.genai import types as vertex_types
+# Database Import (Firestore)
+from google.cloud import firestore
 
+# --- NEW: Firebase Admin Import ---
+import firebase_admin
+from firebase_admin import credentials, auth
 
 
 
 # --- Initial Setup ---
+ROOT_DIR = Path(__file__).parent
 load_dotenv('.env')
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# --- ADD THESE TWO LINES ---
+GOOGLE_CLOUD_PROJECT = os.environ['GOOGLE_CLOUD_PROJECT']
+LOCATION = os.environ['LOCATION']
 
-
-# --- Database Connection ---
+# --- NEW: Firebase Admin SDK Setup ---
+# This automatically uses GOOGLE_APPLICATION_CREDENTIALS
 try:
-    mongo_url = os.environ['MONGO_URL']
-    db_name = os.environ['DB_NAME']
-    client = AsyncIOMotorClient(mongo_url)
-    db = client[db_name]
-    PROJECT_ID = os.environ.get('GOOGLE_CLOUD_PROJECT')
-    LOCATION = os.environ.get('GOOGLE_CLOUD_LOCATION')
-    
-except KeyError as e:
-    logging.error(f"FATAL: Environment variable {e} not found. Your .env file is incomplete.")
-    exit()
+    # Use Application Default Credentials (recommended for Cloud Run/Functions)
+    cred = credentials.ApplicationDefault()
+    firebase_admin.initialize_app(cred, {
+        'projectId': os.environ['GOOGLE_CLOUD_PROJECT'],
+    })
+    logging.info("Firebase Admin SDK initialized.")
+except Exception as e:
+    logging.error(f"FATAL: Could not initialize Firebase Admin SDK: {e}")
+    # If GOOGLE_APPLICATION_CREDENTIALS env var is set, try that
+    try:
+        cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+        if cred_path:
+            cred_obj = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred_obj, {
+                'projectId': os.environ['GOOGLE_CLOUD_PROJECT'],
+            })
+            logging.info("Firebase Admin SDK initialized using GOOGLE_APPLICATION_CREDENTIALS file.")
+        else:
+            raise e
+    except Exception as final_e:
+        logging.error(f"FATAL: Could not initialize Firebase Admin SDK: {final_e}")
+        exit()
 
+
+# --- Firestore Connection ---
+try:
+    db = firestore.AsyncClient()
+    logging.info("Successfully connected to Firestore.")
+except Exception as e:
+    logging.error(f"FATAL: Could not connect to Firestore: {e}")
+    exit()
 
 
 # --- Gemini API Configuration ---
@@ -52,25 +80,9 @@ gemini_api_key = os.environ.get('GEMINI_API_KEY')
 if not gemini_api_key:
     logging.error("FATAL: GEMINI_API_KEY not found in .env file.")
 
-
-try:
-    SERVICE_ACCOUNT_KEY_FILE = os.environ['SERVICE_ACCOUNT_KEY_FILE']
-    PROJECT_ID = os.environ['PROJECT_ID']
-    LOCATION = os.environ['LOCATION']
-
-
-    # Set Google credentials for authentication
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_ACCOUNT_KEY_FILE
-
-
-except KeyError as e:
-    logging.error(f"FATAL: Environment variable {e} not found. Your .env file is incomplete.")
-    exit()
-
-
 vertex_client = vertex_genai.Client(
     vertexai=True,
-    project=PROJECT_ID,
+    project=GOOGLE_CLOUD_PROJECT,
     location=LOCATION,
     http_options=vertex_types.HttpOptions(timeout=60_000)
 )
@@ -80,18 +92,11 @@ vertex_client = vertex_genai.Client(
 
 # --- Pydantic Models (Data Structures) ---
 class User(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    email: str
-    name: str
+    id: str = Field(alias="uid") # Use Firebase 'uid' as the ID
+    email: Optional[str] = None
+    name: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-
-
-class Session(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: str
-    session_token: str
-    expires_at: datetime
 
 
 
@@ -109,16 +114,17 @@ class SourceLink(BaseModel):
 
 class AnalysisResult(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    user_id: Optional[str] = None
+    user_id: Optional[str] = None # This will be the Firebase uid
     content: str
     content_type: str
+    # Updated fields to match your refactored model
     credibilityScore: int
     statusLabel: str
-    analysisReasoning: str
-    sourceLinks: List[SourceLink]
     confidence: float
+    analysisReasoning: str
     education_tips: List[str]
     timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    sourceLinks: List[SourceLink]  # <-- THIS IS THE FIX
 
 
 
@@ -399,59 +405,64 @@ Analyze for emotional manipulation, unreliable sources, logical fallacies, or al
 async def lifespan(app: FastAPI):
     logging.info("API is starting up.")
     yield
-    logging.info("Closing MongoDB connection.")
-    client.close()
+    logging.info("Closing Firestore connection.")
+    await db.close()
 
 
 
 app = FastAPI(title="TruthLens API", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
-security = HTTPBearer(auto_error=False)
+security = HTTPBearer()
 
 
 
-# --- Authentication Helpers & Routes (Dummy Implementation) ---
-async def get_current_user(request: Request) -> Optional[User]:
-    session_token = request.cookies.get("session_token")
-    if not session_token:
-        return None
+# --- Authentication Helpers (NEW: FIREBASE TOKEN VERIFICATION) ---
+async def get_current_user(creds: HTTPAuthorizationCredentials = Depends(security)) -> User:
+    """
+    Verifies the Firebase ID token and gets/creates a user in our Firestore.
+    """
+    if not creds or not creds.credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    token = creds.credentials
+    
+    try:
+        # Verify the token using Firebase Admin SDK
+        # This is a synchronous call, but it's fast (mostly local validation + one network call for keys)
+        # For very high throughput, you might run it in an executor, but this is usually fine.
+        decoded_token = auth.verify_id_token(token)
+        
+        uid = decoded_token["uid"]
+        email = decoded_token.get("email")
+        name = decoded_token.get("name")
+        
+        # Get or create the user in *our* Firestore database
+        user_ref = db.collection("users").document(uid)
+        user_doc = await user_ref.get()
+        
+        if not user_doc.exists:
+            # Create a new user entry
+            user_data = {
+                "uid": uid,
+                "email": email,
+                "name": name,
+                "created_at": datetime.now(timezone.utc)
+            }
+            await user_ref.set(user_data)
+            # Use Pydantic's alias to map 'uid' to 'id'
+            return User(**user_data)
+        else:
+            # User already exists
+            return User(**user_doc.to_dict())
+
+    except auth.InvalidIdTokenError as e:
+        logging.warning(f"Invalid ID token: {e}")
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    except Exception as e:
+        logging.error(f"Auth error: {e}")
+        raise HTTPException(status_code=500, detail="Error verifying authentication")
 
 
-    session = await db.sessions.find_one({
-        "session_token": session_token,
-        "expires_at": {"$gt": datetime.now(timezone.utc)}
-    })
-    if not session:
-        return None
-
-
-    user_data = await db.users.find_one({"id": session["user_id"]})
-    return User(**user_data) if user_data else None
-
-
-
-@api_router.post("/auth/session", summary="Create a dummy session for testing")
-async def create_dummy_session(response: Response):
-    dummy_email = "testuser@example.com"
-    user_data = await db.users.find_one({"email": dummy_email})
-    if not user_data:
-        user = User(email=dummy_email, name="Test User")
-        await db.users.insert_one(user.dict())
-    else:
-        user = User(**user_data)
-
-
-    session_token = f"st_dummy_{uuid.uuid4()}"
-    expires_at = datetime.now(timezone.utc) + timedelta(days=7)
-    session_obj = Session(user_id=user.id, session_token=session_token, expires_at=expires_at)
-    await db.sessions.insert_one(session_obj.dict())
-
-
-    response.set_cookie(
-        "session_token", session_token, max_age=7*24*3600, httponly=True,
-        secure=True, samesite="none", path="/"
-    )
-    return {"user": user.dict()}
 
 
 
@@ -462,14 +473,6 @@ async def get_current_user_info(user: User = Depends(get_current_user)):
     return user
 
 
-
-@api_router.post("/auth/logout", summary="Log out the user")
-async def logout(request: Request, response: Response):
-    session_token = request.cookies.get("session_token")
-    if session_token:
-        await db.sessions.delete_one({"session_token": session_token})
-    response.delete_cookie("session_token", path="/")
-    return {"message": "Logged out successfully"}
 
 
 
@@ -498,10 +501,14 @@ async def analyze_content_endpoint(req: AnalysisRequest, user: Optional[User] = 
         **analysis_data
     )
 
-
-    # Save to database
-    await db.analyses.insert_one(result.dict())
-    return result
+    
+    # Save to Firestore
+    try:
+        await db.collection("analyses").document(result.id).set(result.dict())
+        return result
+    except Exception as e:
+        logging.error(f"Failed to save analysis to Firestore: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save analysis result")
 
 
 @api_router.post("/factcheck", response_model=FactCheckResponse, summary="Verify a factual claim using Gemini 2.5 Flash-Lite")
@@ -521,14 +528,19 @@ async def fact_check_endpoint(req: FactCheckRequest, user: Optional[User] = Depe
     )
 
 
-    # Optionally store result in DB
-    await db.factchecks.insert_one({
-        "user_id": user.id if user else None,
-        "claim": req.claim,
-        "analysis": response.analysis,
-        "sources": [s.dict() for s in response.sources],
-        "timestamp": datetime.now(timezone.utc)
-    })
+# Optionally store result in DB
+    try:
+        doc_data = {
+            "user_id": user.id if user else None,
+            "claim": req.claim,
+            "analysis": response.analysis,
+            "sources": [s.dict() for s in response.sources],
+            "timestamp": datetime.now(timezone.utc)
+        }
+        await db.collection("factchecks").document().set(doc_data)
+    except Exception as e:
+        logging.error(f"Failed to save fact-check to Firestore: {e}")
+        # Don't fail the whole request, just log the error
 
 
     return response
@@ -542,9 +554,17 @@ async def get_analysis_history(user: User = Depends(get_current_user), limit: in
         raise HTTPException(status_code=401, detail="Authentication required")
 
 
-    analyses_cursor = db.analyses.find({"user_id": user.id}).sort("timestamp", -1).skip(skip).limit(limit)
-    analyses = await analyses_cursor.to_list(length=limit)
-    total_count = await db.analyses.count_documents({"user_id": user.id})
+# 1. Create the query
+    query_ref = db.collection("analyses").where(field_path="user_id", op_string="==", value=user.id).order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit).offset(skip)
+    
+    # 2. Get the documents
+    analyses_docs_stream = query_ref.stream()
+    analyses = [AnalysisResult(**doc.to_dict()) async for doc in analyses_docs_stream]
+    
+    # 3. Get the total count (This is a separate query in Firestore)
+    count_query = db.collection("analyses").where(field_path="user_id", op_string="==", value=user.id)
+    count_stream = count_query.stream()
+    total_count = len([doc async for doc in count_stream])
 
 
     return HistoryResponse(

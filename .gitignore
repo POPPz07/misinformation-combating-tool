@@ -82,3 +82,75 @@ agenthub/agents/youtube/db
 android-sdk/ 
 
 backend/.env
+backend/server2.py
+backend/Dockerfile
+backend/docker-compose.yml
+backend/__pycache__/
+backend/*.pyc
+backend/venv/
+frontend/.env
+frontend/node_modules/
+
+
+# Operating System files
+.DS_Store
+Thumbs.db
+
+# ----------------
+# Python / Backend
+# ----------------
+
+# Virtual Environment
+venv/
+backend/venv/
+
+# Python cache
+__pycache__/
+backend/__pycache__/
+*.py[cod]
+*$py.class
+
+# -----------------
+# Node.js / Frontend
+# -----------------
+
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Production build
+frontend/build/
+
+# Firebase cache
+.firebase/
+
+# -----------------
+# Sensitive Files
+# -----------------
+
+# Environment variables
+# Ignore all .env files
+*.env
+.env
+/backend/.env
+/frontend/.env
+
+# Credentials
+# Ignore all service account keys
+service_account_key.json
+/backend/service_account_key.json
+
+# -----------------
+# Local SDKs & Tools
+# -----------------
+
+# Ignore local Google Cloud SDK installation
+google-cloud-sdk/
+
+# Ignore local scripts/executables
+cloud_env.bat
+install_mode
+uninstaller.exe
+
+# Log files
+*.log
