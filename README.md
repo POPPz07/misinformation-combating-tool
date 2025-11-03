@@ -1,6 +1,6 @@
 ## Overview
 
-*Misinformation Combating Tool* is an open-source platform designed to help users identify, analyze, and combat misinformation online. Leveraging both automated and manual review processes, it provides features for fact-checking, source validation, and reporting suspicious content.
+*TruthLens - Misinformation Combating Tool* is an open-source platform designed to help users identify, analyze, and combat misinformation online. Leveraging both automated and manual review processes, it provides features for fact-checking, source validation, and reporting suspicious content.
 
 ## Features
 
